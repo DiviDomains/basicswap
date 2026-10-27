@@ -1318,7 +1318,10 @@ class BasicSwap(BaseApp, BSXNetwork, UIApp):
         elif coin == Coins.DIVI:
             from .interface.divi.divi import DIVIInterface
 
-            return DIVIInterface(self.coin_clients[coin], self.chain, self)
+            interface = DIVIInterface(self.coin_clients[coin], self.chain, self)
+            if self.coin_clients[coin].get("connection_type") == "electrum":
+                self._initElectrumBackend(coin, interface)
+            return interface
         else:
             raise ValueError("Unknown coin type")
 
