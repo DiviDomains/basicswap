@@ -133,6 +133,32 @@ hand. A staking Divi wallet can spend any of its own outputs as a coinstake inpu
 block, so the selection is locked with `lockunspent` (divid honours it for coinstake), each input
 is confirmed with `gettxout`, and any input lost in the window is reselected.
 
+## Light wallet (Electrum)
+
+`--divi-mode=electrum` runs Divi without a local node: the keys live in BasicSwap's own wallet
+and chain data comes from an IronDivi node started with `-electrum` or `-electrumtls`. How to
+run such a server publicly (TLS, binding, limits, checkpoints) is in IronDivi's
+`docs/electrum-server.md`.
+
+```
+basicswap-prepare --withcoins=divi --light --divi-mode=electrum \
+    --divi-electrum-server=electrum.example.org:50002:s
+```
+
+There is no default public Divi server, so `--divi-electrum-server` is required. What differs
+from the Bitcoin-family light wallets:
+
+- Addresses are P2PKH on BIP44 paths (`m/44'/119'/0'` mainnet, coin type 1 on test networks),
+  since Divi has no SegWit. Inputs are signed with the legacy sighash, and fees are sized at
+  148 bytes per input; the fee rate never drops below the 0.0001 DIVI/kB relay fee.
+- Headers are 80 bytes up to version 3 and 112 bytes from version 4; the server pads them all to
+  112. A version 4+ header is checked by sha256d over the 112 bytes. Older headers hash with
+  Quark, which BasicSwap does not implement, so they are taken from the server, or from
+  `interface/divi/checkpoints/<network>.json` when that file exists (none ship yet). Divi is
+  proof of stake, so there is no work check: the client trusts its server about which chain is
+  best. Use a server you run or trust.
+- The light wallet cannot be exported to an external Electrum wallet.
+
 ## Tests
 
 - `tests/basicswap/test_prepare_divi.py`: prepare-time behaviour (RPC credentials, seed pipe, and the
@@ -140,6 +166,11 @@ is confirmed with `gettxout`, and any input lost in the window is reselected.
 - `tests/basicswap/extended/test_divi.py`: regtest swaps against IronDivi, with PART, BTC and LTC as
   the other coin. Secret-hash and adaptor-signature swaps in both directions, refunds,
   coin B lock recovery, a private offer, a node stopped mid-swap, wallet withdraw, and the web UI.
+- `tests/basicswap/extended/test_divi_electrum.py`: the same regtest setup with node 1 as a Divi
+  light wallet served by node 0's IronDivi Electrum port. Needs an IronDivi `divid` built with
+  the Electrum server.
+- `tests/basicswap/test_divi_electrum_*.py`, `test_divi_wallet_manager.py`: headers, signing,
+  fees and address derivation for the light wallet.
 
 There is no public Divi testnet faucet and testnet difficulty makes CPU mining impractical, so
 funded tests use regtest, where `setgenerate <n>` mines immediately.
