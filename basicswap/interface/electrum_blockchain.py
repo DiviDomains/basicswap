@@ -118,14 +118,15 @@ def serialize_header(header_dict: dict) -> bytes:
         + int.to_bytes(
             int(header_dict["nonce"]), length=4, byteorder="little", signed=False
         )
+        + bytes.fromhex(header_dict.get("extra", ""))
     )
     return s
 
 
-def deserialize_header(s: bytes, height: int) -> dict:
+def deserialize_header(s: bytes, height: int, header_size: int = HEADER_SIZE) -> dict:
     if not s:
         raise InvalidHeader("Invalid header: {}".format(s))
-    if len(s) != HEADER_SIZE:
+    if len(s) != header_size:
         raise InvalidHeader("Invalid header length: {}".format(len(s)))
     h = {}
     h["version"] = int.from_bytes(s[0:4], byteorder="little")
@@ -134,6 +135,9 @@ def deserialize_header(s: bytes, height: int) -> dict:
     h["timestamp"] = int.from_bytes(s[68:72], byteorder="little")
     h["bits"] = int.from_bytes(s[72:76], byteorder="little")
     h["nonce"] = int.from_bytes(s[76:80], byteorder="little")
+    if header_size > HEADER_SIZE:
+        # Fields after the nonce, such as Divi's accumulator checkpoint
+        h["extra"] = s[HEADER_SIZE:].hex()
     h["block_height"] = height
     return h
 
@@ -162,10 +166,20 @@ class HeaderNet:
         target_timespan: int,
         pow_hash_header=hash_header,
         timestamp_before_chunk: bool = False,
+        header_size: int = HEADER_SIZE,
+        hash_raw=hash_raw_header,
+        skip_pow: bool = False,
     ):
+        """hash_raw may return None for a header the client cannot hash.
+        Such a header is not linked by hash to the one before or after it.
+        skip_pow turns off proof-of-work checks, for proof-of-stake chains,
+        and then chainwork is the height."""
         self.GENESIS = genesis
         self.CHECKPOINTS = checkpoints
         self.TESTNET = testnet
+        self.SKIP_POW = testnet or skip_pow
+        self.HEADER_SIZE = header_size
+        self._hash_raw = hash_raw
         self.MAX_TARGET = max_target
         self.FIRST_TARGET = first_target
         self.TARGET_TIMESPAN = target_timespan
@@ -174,6 +188,19 @@ class HeaderNet:
 
     def max_checkpoint(self) -> int:
         return max(0, len(self.CHECKPOINTS) * CHUNK_SIZE - 1)
+
+    def hash_raw_header(self, raw: bytes) -> str | None:
+        return self._hash_raw(raw)
+
+    def hash_header(self, header: dict | None) -> str | None:
+        if header is None:
+            return "0" * 64
+        if header.get("prev_block_hash") is None:
+            header["prev_block_hash"] = "00" * 32
+        return self.hash_raw_header(serialize_header(header))
+
+    def deserialize_header(self, s: bytes, height: int) -> dict:
+        return deserialize_header(s, height, self.HEADER_SIZE)
 
 
 class BlockchainManager:
@@ -246,7 +273,7 @@ class BlockchainManager:
             prev_hash=prev_hash,
         )
         h = b.read_header(b.forkpoint)
-        if first_hash != hash_header(h):
+        if first_hash != self.net.hash_header(h):
             self._delete_chain(filename, "incorrect first hash for chain")
             return
         if not b.parent.can_connect(h, check_height=False):
@@ -263,7 +290,7 @@ class BlockchainManager:
     def _init_headers_file_for_best_chain(self):
         b = self.get_best_chain()
         filename = b.path()
-        length = HEADER_SIZE * len(self.net.CHECKPOINTS) * CHUNK_SIZE
+        length = self.net.HEADER_SIZE * len(self.net.CHECKPOINTS) * CHUNK_SIZE
         if not filename.exists() or filename.stat().st_size < length:
             with open(filename, "wb") as f:
                 if length > 0:
@@ -369,8 +396,16 @@ class Blockchain:
         return self.height() - self.get_max_forkpoint() + 1
 
     def check_header(self, header: dict) -> bool:
-        header_hash = hash_header(header)
+        header_hash = self.net.hash_header(header)
         height = header.get("block_height")
+        if header_hash is None:
+            try:
+                stored = self.read_header(height)
+            except Exception:
+                return False
+            return stored is not None and serialize_header(stored) == serialize_header(
+                header
+            )
         return self.check_hash(height, header_hash)
 
     def check_hash(self, height: int, header_hash: str) -> bool:
@@ -388,7 +423,7 @@ class Blockchain:
             bc_mgr=parent.bc_mgr,
             forkpoint=forkpoint,
             parent=parent,
-            forkpoint_hash=hash_header(header),
+            forkpoint_hash=parent.net.hash_header(header),
             prev_hash=parent.get_hash(forkpoint - 1),
         )
         self.assert_headers_file_available(parent.path())
@@ -410,7 +445,7 @@ class Blockchain:
     @with_lock
     def update_size(self) -> None:
         p = self.path()
-        self._size = os.path.getsize(p) // HEADER_SIZE if p.exists() else 0
+        self._size = os.path.getsize(p) // self.net.HEADER_SIZE if p.exists() else 0
 
     def verify_header(
         self,
@@ -419,19 +454,19 @@ class Blockchain:
         target: int,
         expected_header_hash: str = None,
     ) -> None:
-        _hash = hash_header(header)
-        if expected_header_hash and expected_header_hash != _hash:
+        _hash = self.net.hash_header(header)
+        if expected_header_hash and _hash is not None and expected_header_hash != _hash:
             raise InvalidHeader(
                 "hash mismatches with expected: {} vs {}".format(
                     expected_header_hash, _hash
                 )
             )
-        if prev_hash != header.get("prev_block_hash"):
+        if prev_hash is not None and prev_hash != header.get("prev_block_hash"):
             raise InvalidHeader(
                 "prev hash mismatch: %s vs %s"
                 % (prev_hash, header.get("prev_block_hash"))
             )
-        if self.net.TESTNET:
+        if self.net.SKIP_POW:
             return
         bits = self.target_to_bits(target)
         if bits != header.get("bits"):
@@ -444,7 +479,8 @@ class Blockchain:
             )
 
     def verify_chunk(self, index: int, data: bytes) -> None:
-        num = len(data) // HEADER_SIZE
+        size = self.net.HEADER_SIZE
+        num = len(data) // size
         start_height = index * CHUNK_SIZE
         prev_hash = self.get_hash(start_height - 1)
         target = self.get_target(index - 1)
@@ -454,10 +490,10 @@ class Blockchain:
                 expected_header_hash = self.get_hash(height)
             except MissingHeader:
                 expected_header_hash = None
-            raw_header = data[i * HEADER_SIZE : (i + 1) * HEADER_SIZE]
-            header = deserialize_header(raw_header, index * CHUNK_SIZE + i)
+            raw_header = data[i * size : (i + 1) * size]
+            header = self.net.deserialize_header(raw_header, index * CHUNK_SIZE + i)
             self.verify_header(header, prev_hash, target, expected_header_hash)
-            prev_hash = hash_header(header)
+            prev_hash = self.net.hash_header(header)
 
     @with_lock
     def path(self) -> Path:
@@ -480,7 +516,7 @@ class Blockchain:
             return
 
         delta_height = index * CHUNK_SIZE - self.forkpoint
-        delta_bytes = delta_height * HEADER_SIZE
+        delta_bytes = delta_height * self.net.HEADER_SIZE
         if delta_bytes < 0:
             chunk = chunk[-delta_bytes:]
             delta_bytes = 0
@@ -524,16 +560,17 @@ class Blockchain:
             f"forkpoint of parent chain ({parent.forkpoint}) "
             f"should be at lower height than children's ({forkpoint})"
         )
+        size = self.net.HEADER_SIZE
         with open(parent.path(), "rb") as f:
-            f.seek((forkpoint - parent.forkpoint) * HEADER_SIZE)
-            parent_data = f.read(parent_branch_size * HEADER_SIZE)
+            f.seek((forkpoint - parent.forkpoint) * size)
+            parent_data = f.read(parent_branch_size * size)
         self.write(parent_data, 0)
-        parent.write(my_data, (forkpoint - parent.forkpoint) * HEADER_SIZE)
+        parent.write(my_data, (forkpoint - parent.forkpoint) * size)
         self.parent, parent.parent = parent.parent, self
         self.forkpoint, parent.forkpoint = parent.forkpoint, self.forkpoint
         self._forkpoint_hash, parent._forkpoint_hash = (
             parent._forkpoint_hash,
-            hash_raw_header(parent_data[:HEADER_SIZE]),
+            self.net.hash_raw_header(parent_data[:size]),
         )
         self._prev_hash, parent._prev_hash = parent._prev_hash, self._prev_hash
         os.replace(child_old_name, parent.path())
@@ -570,7 +607,7 @@ class Blockchain:
         filename = self.path()
         self.assert_headers_file_available(filename)
         with open(filename, "rb+") as f:
-            if truncate and offset != self._size * HEADER_SIZE:
+            if truncate and offset != self._size * self.net.HEADER_SIZE:
                 f.seek(offset)
                 f.truncate()
             f.seek(offset)
@@ -585,8 +622,8 @@ class Blockchain:
         delta = header.get("block_height") - self.forkpoint
         data = serialize_header(header)
         assert delta == self.size(), (delta, self.size())
-        assert len(data) == HEADER_SIZE
-        self.write(data, delta * HEADER_SIZE, fsync=False)
+        assert len(data) == self.net.HEADER_SIZE
+        self.write(data, delta * self.net.HEADER_SIZE, fsync=False)
         self.swap_with_parent()
 
     @with_lock
@@ -600,18 +637,19 @@ class Blockchain:
         delta = height - self.forkpoint
         name = self.path()
         self.assert_headers_file_available(name)
+        size = self.net.HEADER_SIZE
         with open(name, "rb") as f:
-            f.seek(delta * HEADER_SIZE)
-            h = f.read(HEADER_SIZE)
-            if len(h) < HEADER_SIZE:
+            f.seek(delta * size)
+            h = f.read(size)
+            if len(h) < size:
                 raise Exception(
                     "Expected to read a full header. This was only {} bytes".format(
                         len(h)
                     )
                 )
-        if h == bytes([0]) * HEADER_SIZE:
+        if h == bytes([0]) * size:
             return None
-        return deserialize_header(h, height)
+        return self.net.deserialize_header(h, height)
 
     def header_at_tip(self) -> dict | None:
         return self.read_header(self.height())
@@ -633,7 +671,7 @@ class Blockchain:
             header = self.read_header(height)
             if header is None:
                 raise MissingHeader(height)
-            return hash_header(header)
+            return self.net.hash_header(header)
 
     def get_timestamp(self, height: int) -> int | None:
         if (
@@ -647,7 +685,7 @@ class Blockchain:
 
     def get_target(self, index: int) -> int:
         # compute target from chunk x, used in chunk x+1
-        if self.net.TESTNET:
+        if self.net.SKIP_POW:
             return 0
         if index == -1:
             return self.net.FIRST_TARGET
@@ -721,7 +759,7 @@ class Blockchain:
     def get_chainwork(self, height=None) -> int:
         if height is None:
             height = max(0, self.height())
-        if self.net.TESTNET:
+        if self.net.SKIP_POW:
             return height
         cache = self.bc_mgr.chainwork_cache
         last_retarget = height // CHUNK_SIZE * CHUNK_SIZE - 1
@@ -750,12 +788,17 @@ class Blockchain:
         if check_height and self.height() != height - 1:
             return False
         if height == 0:
-            return hash_header(header) == self.net.GENESIS
+            header_hash = self.net.hash_header(header)
+            if header_hash is None:
+                # A genesis the client cannot hash is trusted, and
+                # height 1 then links to the known genesis hash.
+                return header.get("prev_block_hash") == "00" * 32
+            return header_hash == self.net.GENESIS
         try:
             prev_hash = self.get_hash(height - 1)
         except Exception:
             return False
-        if prev_hash != header.get("prev_block_hash"):
+        if prev_hash is not None and prev_hash != header.get("prev_block_hash"):
             return False
         try:
             target = self.get_target(height // CHUNK_SIZE - 1)
@@ -806,10 +849,10 @@ class HeaderSync:
         if not isinstance(height, int) or height < 0:
             raise Exception(f"{repr(height)} is not a block height")
         if raw_header := self._headers_cache.get(height):
-            return deserialize_header(raw_header, height)
+            return self.bc_mgr.net.deserialize_header(raw_header, height)
         self.log.debug(f"requesting block header {height} in mode={mode}")
         res = self.server.call("blockchain.block.header", [height])
-        return deserialize_header(bytes.fromhex(res), height)
+        return self.bc_mgr.net.deserialize_header(bytes.fromhex(res), height)
 
     def get_block_headers(
         self, *, start_height: int, count: int, mode: str | None = None
@@ -834,10 +877,11 @@ class HeaderSync:
         hex_headers_concat = res.get("hex")
         if not isinstance(hex_headers_concat, str):
             raise RequestCorrupted("block.headers reply lacks hex")
-        if len(hex_headers_concat) != HEADER_SIZE * 2 * res["count"]:
+        size = self.bc_mgr.net.HEADER_SIZE
+        if len(hex_headers_concat) != size * 2 * res["count"]:
             raise RequestCorrupted("inconsistent chunk hex and count")
         data = bytes.fromhex(hex_headers_concat)
-        headers = [data[i : i + HEADER_SIZE] for i in range(0, len(data), HEADER_SIZE)]
+        headers = [data[i : i + size] for i in range(0, len(data), size)]
         if res["max"] < MAX_NUM_HEADERS_PER_REQUEST:
             raise RequestCorrupted(
                 f"server uses too low 'max' count for block.headers: {res['max']} < {MAX_NUM_HEADERS_PER_REQUEST}"

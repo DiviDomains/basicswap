@@ -21,6 +21,8 @@ differences from PIVX, all verified against divid v3.0.0:
     the mnemonic= / hdseed= config options.  See initialiseWallet below.
 """
 
+import os
+
 from io import BytesIO
 
 from basicswap.chainparams import Coins
@@ -42,8 +44,38 @@ from basicswap.contrib.test_framework.script import (
 from basicswap.util import b2i, ensure
 from basicswap.util.crypto import hash160
 from basicswap.interface.btc.btc import BTCInterface, findOutput
+from basicswap.interface.electrum_blockchain import (
+    HeaderNet,
+    hash_encode,
+    sha256d,
+)
 from basicswap.rpc import make_rpc_func
 from basicswap.util.address import decodeAddress
+
+
+# Divi headers are 80 bytes at version <= 3 and 112 bytes after, and the
+# IronDivi Electrum server pads every header to 112.  See
+# IronDivi docs/electrum-server.md.
+DIVI_HEADER_SIZE = 112
+
+# chainparams.py carries no genesis hash for Divi.  These are the hashes of the
+# (legacy, Quark-hashed) genesis blocks.
+DIVI_GENESIS = {
+    "mainnet": "00000e258596876664989374c7ee36445cf5f4f80889af415cc32478214394ea",
+    "testnet": "00000f43b54bbcae395d815b255ac4ed0693bca7987d72b873d5d4b68d73a6bd",
+    "regtest": "0000000b3f9980dcf71f5f52d69e30d3b02f807e0a77b91b6091701e4ae51a6f",
+}
+
+
+def divi_hash_raw_header(raw: bytes) -> str | None:
+    """sha256d over the 112 bytes for a version 4+ header.
+
+    A version 3 or older header hashes with Quark, which BasicSwap does not
+    implement, so None: the header is trusted, not linked by hash.
+    """
+    if int.from_bytes(raw[:4], "little") < 4:
+        return None
+    return hash_encode(sha256d(raw[:DIVI_HEADER_SIZE]))
 
 
 class DIVIInterface(BTCInterface):
@@ -69,6 +101,26 @@ class DIVIInterface(BTCInterface):
             self._rpcport, self._rpcauth, host=self._rpc_host
         )
         self.rpc_wallet_watch = self.rpc_wallet
+
+    # -- electrum ----------------------------------------------------------
+
+    def _electrumCheckpointsDir(self) -> str:
+        return os.path.join(os.path.dirname(__file__), "checkpoints")
+
+    def _electrumHeaderNet(self) -> HeaderNet:
+        # Proof of stake: there is no work to check, so skip_pow.  The targets
+        # are only read by the proof-of-work checks.
+        return HeaderNet(
+            genesis=DIVI_GENESIS[self._network],
+            checkpoints=self._electrumCheckpoints(),
+            testnet=self._network != "mainnet",
+            max_target=0x00000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
+            first_target=0x00000FFFF0000000000000000000000000000000000000000000000000000000,
+            target_timespan=60,
+            header_size=DIVI_HEADER_SIZE,
+            hash_raw=divi_hash_raw_header,
+            skip_pow=True,
+        )
 
     # -- wallet ------------------------------------------------------------
 

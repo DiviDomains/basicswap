@@ -58,7 +58,6 @@ from basicswap.interface.electrum_blockchain import (
     HeaderNet,
     HeaderSync,
     MerkleVerificationFailure,
-    hash_header,
     is_valid_tx,
     verify_tx_is_in_block,
 )
@@ -687,7 +686,7 @@ class BTCInterface(FeeValidator, Secp256k1Interface):
             raise ValueError(f"No verified header at height {height}")
         return {
             "height": height,
-            "hash": hash_header(header),
+            "hash": self._electrumHashHeader(header),
             "time": header["timestamp"],
         }
 
@@ -705,7 +704,7 @@ class BTCInterface(FeeValidator, Secp256k1Interface):
         )
         if header is None:
             return None
-        block_hash = hash_header(header)
+        block_hash = self._electrumHashHeader(header)
         if (
             self._merkle_verified.get(txid_hex) == block_height
             and self._merkle_block_hashes.get(txid_hex) == block_hash
@@ -765,6 +764,17 @@ class BTCInterface(FeeValidator, Secp256k1Interface):
             first_target=0x00000000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
             target_timespan=14 * 24 * 60 * 60,
         )
+
+    def _electrumHashHeader(self, header: dict) -> str:
+        net = (
+            self._header_bc_mgr.net
+            if self._header_bc_mgr is not None
+            else self._electrumHeaderNet()
+        )
+        header_hash = net.hash_header(header)
+        if header_hash is None:
+            raise ValueError(f"Cannot hash header at {header.get('block_height')}")
+        return header_hash
 
     def _isValidTxBytes(self, data: bytes) -> bool:
         return is_valid_tx(data)
@@ -845,9 +855,9 @@ class BTCInterface(FeeValidator, Secp256k1Interface):
         for key, sync in self._header_syncs.items():
             if key == primary_key or sync.tip_header is None:
                 continue
-            if sync.blockchain is best and hash_header(sync.tip_header) == hash_header(
-                best_header
-            ):
+            if sync.blockchain is best and best.net.hash_header(
+                sync.tip_header
+            ) == best.net.hash_header(best_header):
                 self._log.info(
                     f"{self.coin_name()} electrum server {primary_key} is lagging or on another chain, switching to {key}"
                 )
@@ -5709,7 +5719,7 @@ class BTCInterface(FeeValidator, Secp256k1Interface):
             if header is None:
                 return None
             return {
-                "block_hash": bytes.fromhex(hash_header(header)),
+                "block_hash": bytes.fromhex(self._electrumHashHeader(header)),
                 "block_height": block_height,
                 "block_time": header["timestamp"],
             }
