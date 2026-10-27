@@ -16,7 +16,7 @@ from basicswap.interface.prepare_util import (
     getOSDirNames,
 )
 
-DIVI_VERSION = os.getenv("DIVI_VERSION", "0.2.7")
+DIVI_VERSION = os.getenv("DIVI_VERSION", "0.2.8")
 DIVI_VERSION_TAG = os.getenv("DIVI_VERSION_TAG", "")
 
 DIVI_RPC_HOST = os.getenv("DIVI_RPC_HOST", "127.0.0.1")
