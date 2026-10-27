@@ -11305,38 +11305,7 @@ class BasicSwap(BaseApp, BSXNetwork, UIApp):
                             f"Failed to get spend tx {spend_info['txid']}, will retry"
                         )
                         continue
-                    tx = ci.loadTx(bytes.fromhex(raw_tx))
-                    vin_list = []
-                    for idx, inp in enumerate(tx.vin):
-                        vin_entry = {
-                            "txid": f"{inp.prevout.hash:064x}",
-                            "vout": inp.prevout.n,
-                        }
-                        if len(inp.scriptSig) > 0:
-                            vin_entry["scriptSig"] = {
-                                "asm": scriptToAsm(inp.scriptSig),
-                                "hex": inp.scriptSig.hex(),
-                            }
-                        if tx.wit and idx < len(tx.wit.vtxinwit):
-                            wit = tx.wit.vtxinwit[idx]
-                            if wit.scriptWitness and wit.scriptWitness.stack:
-                                vin_entry["txinwitness"] = [
-                                    item.hex() for item in wit.scriptWitness.stack
-                                ]
-                        vin_list.append(vin_entry)
-                    tx_dict = {
-                        "txid": spend_info["txid"],
-                        "hex": raw_tx,
-                        "vin": vin_list,
-                        "vout": [
-                            {
-                                "value": ci.format_amount(out.nValue),
-                                "n": i,
-                                "scriptPubKey": {"hex": out.scriptPubKey.hex()},
-                            }
-                            for i, out in enumerate(tx.vout)
-                        ],
-                    }
+                    tx_dict = self._electrumSpendTxDict(ci, spend_info["txid"], raw_tx)
                     self.processSpentOutput(
                         coin_type, o, spend_info["txid"], spend_info["vin"], tx_dict
                     )
@@ -11387,33 +11356,9 @@ class BasicSwap(BaseApp, BSXNetwork, UIApp):
                         continue
                     raw_tx = ci.getBackend().getTransactionRaw(spend_info["txid"])
                     if raw_tx:
-                        tx = ci.loadTx(bytes.fromhex(raw_tx))
-                        vin_list = []
-                        for idx, inp in enumerate(tx.vin):
-                            vin_entry = {
-                                "txid": f"{inp.prevout.hash:064x}",
-                                "vout": inp.prevout.n,
-                            }
-                            if tx.wit and idx < len(tx.wit.vtxinwit):
-                                wit = tx.wit.vtxinwit[idx]
-                                if wit.scriptWitness and wit.scriptWitness.stack:
-                                    vin_entry["txinwitness"] = [
-                                        item.hex() for item in wit.scriptWitness.stack
-                                    ]
-                            vin_list.append(vin_entry)
-                        tx_dict = {
-                            "txid": spend_info["txid"],
-                            "hex": raw_tx,
-                            "vin": vin_list,
-                            "vout": [
-                                {
-                                    "value": ci.format_amount(out.nValue),
-                                    "n": i,
-                                    "scriptPubKey": {"hex": out.scriptPubKey.hex()},
-                                }
-                                for i, out in enumerate(tx.vout)
-                            ],
-                        }
+                        tx_dict = self._electrumSpendTxDict(
+                            ci, spend_info["txid"], raw_tx
+                        )
                         results["outputs"].append((o, spend_info, tx_dict))
             except Exception as e:
                 self.log.debug(f"_fetchSpendsElectrum checkWatchedOutput error: {e}")
@@ -11434,6 +11379,42 @@ class BasicSwap(BaseApp, BSXNetwork, UIApp):
                 self.log.debug(f"_fetchSpendsElectrum checkWatchedScript error: {e}")
 
         return results
+
+    def _electrumSpendTxDict(self, ci, txid: str, raw_tx: str) -> dict:
+        # The subset of a decoded tx that processSpentOutput reads.
+        tx = ci.loadTx(bytes.fromhex(raw_tx))
+        vin_list = []
+        for idx, inp in enumerate(tx.vin):
+            vin_entry = {
+                "txid": f"{inp.prevout.hash:064x}",
+                "vout": inp.prevout.n,
+            }
+            if len(inp.scriptSig) > 0:
+                # Non-segwit coins carry the swap secret in the scriptSig.
+                vin_entry["scriptSig"] = {
+                    "asm": scriptToAsm(inp.scriptSig),
+                    "hex": inp.scriptSig.hex(),
+                }
+            if tx.wit and idx < len(tx.wit.vtxinwit):
+                wit = tx.wit.vtxinwit[idx]
+                if wit.scriptWitness and wit.scriptWitness.stack:
+                    vin_entry["txinwitness"] = [
+                        item.hex() for item in wit.scriptWitness.stack
+                    ]
+            vin_list.append(vin_entry)
+        return {
+            "txid": txid,
+            "hex": raw_tx,
+            "vin": vin_list,
+            "vout": [
+                {
+                    "value": ci.format_amount(out.nValue),
+                    "n": i,
+                    "scriptPubKey": {"hex": out.scriptPubKey.hex()},
+                }
+                for i, out in enumerate(tx.vout)
+            ],
+        }
 
     def _processFetchedSpends(self, coin_type, results):
         c = self.coin_clients[coin_type]

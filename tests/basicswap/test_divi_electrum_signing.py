@@ -24,6 +24,7 @@ from basicswap.contrib.test_framework.script import (
     OP_1,
     SIGHASH_ALL,
 )
+from basicswap.basicswap import BasicSwap
 from basicswap.interface.divi.divi import DIVIInterface
 from basicswap.util.crypto import hash160
 from basicswap.util.script import scriptToAsm
@@ -206,6 +207,19 @@ class TestScriptSigAsm(unittest.TestCase):
         self.assertEqual(len(parts), 5)
         self.assertEqual(bytes.fromhex(parts[2]), secret)
         self.assertEqual(parts[3], "1")
+
+    def test_electrum_spend_dict_carries_script_sig(self):
+        ci = make_ci()
+        secret = bytes.fromhex("33" * 32)
+        script_sig = CScript([b"\x30" * 71, b"\x02" * 33, secret, OP_1, b"\x63" * 97])
+        raw = ci.setTxScriptSig(spend_tx(ci).serialize(), 0, bytes(script_sig))
+        txjs = BasicSwap._electrumSpendTxDict(None, ci, "ff" * 32, raw.hex())
+        spend_in = txjs["vin"][0]
+        self.assertEqual(spend_in["txid"], PREV_TXID)
+        self.assertNotIn("txinwitness", spend_in)
+        self.assertEqual(
+            bytes.fromhex(spend_in["scriptSig"]["asm"].split(" ")[2]), secret
+        )
 
     def test_small_ints(self):
         self.assertEqual(scriptToAsm(bytes(CScript([0, 16, b"\xab"]))), "0 16 ab")
