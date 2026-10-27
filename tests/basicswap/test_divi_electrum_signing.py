@@ -21,10 +21,12 @@ from basicswap.contrib.test_framework.messages import (
 from basicswap.contrib.test_framework.script import (
     CScript,
     LegacySignatureHash,
+    OP_1,
     SIGHASH_ALL,
 )
 from basicswap.interface.divi.divi import DIVIInterface
 from basicswap.util.crypto import hash160
+from basicswap.util.script import scriptToAsm
 from tests.basicswap.util.common import REQUIRED_SETTINGS
 
 KEY = bytes.fromhex("11" * 32)
@@ -192,6 +194,21 @@ class TestDiviDescribeTx(unittest.TestCase):
         self.assertEqual(
             txjs["vout"][1]["scriptPubKey"]["address"], ci.encode_p2sh(script)
         )
+
+
+class TestScriptSigAsm(unittest.TestCase):
+    def test_redeem_script_sig_yields_secret(self):
+        # A secret-hash redeem: <sig> <pubkey> <secret> OP_1 <redeemscript>.
+        # extractSecret reads element 2 of the asm, as from bitcoind.
+        secret = bytes.fromhex("33" * 32)
+        script_sig = CScript([b"\x30" * 71, b"\x02" * 33, secret, OP_1, b"\x63" * 90])
+        parts = scriptToAsm(bytes(script_sig)).split(" ")
+        self.assertEqual(len(parts), 5)
+        self.assertEqual(bytes.fromhex(parts[2]), secret)
+        self.assertEqual(parts[3], "1")
+
+    def test_small_ints(self):
+        self.assertEqual(scriptToAsm(bytes(CScript([0, 16, b"\xab"]))), "0 16 ab")
 
 
 class TestDiviFeeRate(unittest.TestCase):

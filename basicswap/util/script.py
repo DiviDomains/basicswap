@@ -7,6 +7,9 @@
 
 import struct
 from basicswap.contrib.test_framework.script import (
+    CScript,
+    OP_1,
+    OP_16,
     OP_PUSHDATA1,
     OP_PUSHDATA2,
     OP_PUSHDATA4,
@@ -116,3 +119,16 @@ def getCompactSizeLen(v):
 
 def getWitnessElementLen(v):
     return getCompactSizeLen(v) + v
+
+
+def scriptToAsm(script_bytes: bytes) -> str:
+    # Like bitcoind's asm: pushes as hex, OP_0..OP_16 as numbers
+    parts = []
+    for item in CScript(script_bytes):
+        if isinstance(item, bytes):
+            parts.append(item.hex() if len(item) > 0 else "0")
+        elif OP_1 <= item <= OP_16:
+            parts.append(str(int(item) - int(OP_1) + 1))
+        else:
+            parts.append(str(item))
+    return " ".join(parts)

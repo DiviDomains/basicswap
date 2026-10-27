@@ -123,6 +123,7 @@ from .util.address import (
     decodeAddress,
     pubkeyToAddress,
 )
+from .util.script import scriptToAsm
 from .util.crypto import sha256
 from .util.logging import LogCategories as LC
 from .util.network import (
@@ -11310,6 +11311,11 @@ class BasicSwap(BaseApp, BSXNetwork, UIApp):
                             "txid": f"{inp.prevout.hash:064x}",
                             "vout": inp.prevout.n,
                         }
+                        if len(inp.scriptSig) > 0:
+                            vin_entry["scriptSig"] = {
+                                "asm": scriptToAsm(inp.scriptSig),
+                                "hex": inp.scriptSig.hex(),
+                            }
                         if tx.wit and idx < len(tx.wit.vtxinwit):
                             wit = tx.wit.vtxinwit[idx]
                             if wit.scriptWitness and wit.scriptWitness.stack:
