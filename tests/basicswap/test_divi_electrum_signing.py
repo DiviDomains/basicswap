@@ -176,6 +176,24 @@ class TestDiviElectrumSizing(unittest.TestCase):
         self.assertLessEqual(fee, size * 10 + 10)
 
 
+class TestDiviDescribeTx(unittest.TestCase):
+    def test_base58_addresses(self):
+        ci = make_ci()
+        script = CScript([b"\x01" * 33])
+        tx = spend_tx(ci)
+        tx.vout.append(CTxOut(5000, ci.getScriptDest(script)))
+        txjs = ci.decodeRawTransaction(tx.serialize().hex())
+        self.assertEqual(txjs["txid"], tx.rehash())
+        self.assertEqual(txjs["vin"][0]["txid"], PREV_TXID)
+        self.assertEqual(
+            txjs["vout"][0]["scriptPubKey"]["address"],
+            ci.pkh_to_address(b"\x22" * 20),
+        )
+        self.assertEqual(
+            txjs["vout"][1]["scriptPubKey"]["address"], ci.encode_p2sh(script)
+        )
+
+
 class TestDiviFeeRate(unittest.TestCase):
     def test_electrum_fallback_is_raised_to_relay_fee(self):
         ci = make_ci()

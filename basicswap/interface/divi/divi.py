@@ -575,6 +575,50 @@ class DIVIInterface(BTCInterface):
         # With no witness to carry it, the redeem script goes in the scriptSig.
         return CScript([script])
 
+    def _describeTxLocal(self, tx_hex: str) -> dict:
+        # BTCInterface decodes bech32 outputs only (KeyError('hrp') here);
+        # Divi outputs are P2PKH or P2SH, so give those their base58 address.
+        tx = self.loadTx(bytes.fromhex(tx_hex))
+        tx.rehash()
+        vout = []
+        for i, out in enumerate(tx.vout):
+            spk = bytes(out.scriptPubKey)
+            scriptPubKey = {"hex": spk.hex()}
+            if (
+                len(spk) == 25
+                and spk[:3] == bytes((OP_DUP, OP_HASH160, 20))
+                and spk[23:] == bytes((OP_EQUALVERIFY, OP_CHECKSIG))
+            ):
+                scriptPubKey["address"] = self.pkh_to_address(spk[3:23])
+            elif (
+                len(spk) == 23
+                and spk[:2] == bytes((OP_HASH160, 20))
+                and spk[22] == OP_EQUAL
+            ):
+                scriptPubKey["address"] = self.sh_to_address(spk[2:22])
+            vout.append(
+                {
+                    "n": i,
+                    "value": self.format_amount(out.nValue),
+                    "scriptPubKey": scriptPubKey,
+                }
+            )
+        vin = [
+            {
+                "txid": f"{inp.prevout.hash:064x}",
+                "vout": inp.prevout.n,
+                "sequence": inp.nSequence,
+            }
+            for inp in tx.vin
+        ]
+        return {
+            "txid": tx.hash,
+            "version": tx.nVersion,
+            "locktime": tx.nLockTime,
+            "vin": vin,
+            "vout": vout,
+        }
+
     # -- chain queries -----------------------------------------------------
 
     def getTransaction(self, txid_hex: str, verbose: bool = True):
