@@ -2429,6 +2429,24 @@ class BTCInterface(FeeValidator, Secp256k1Interface):
         tx_bytes: bytes = bytes.fromhex(rv["hex"])
         return tx_bytes
 
+    # Light-wallet hooks for the input type.  BTCInterface spends P2WPKH; a
+    # chain with no segwit overrides these to spend P2PKH.
+
+    def _electrumInputVSize(self) -> int:
+        return 68
+
+    def _electrumSigBytes(self, n_inputs: int) -> (int, int):
+        # (scriptSig bytes, witness bytes) the signatures will add
+        witness_bytes: int = self.getWitnessStackSerialisedLength(
+            [self.getP2WPKHDummyWitness() for _ in range(n_inputs)]
+        )
+        return 0, witness_bytes
+
+    def _electrumSetInputSig(self, tx, n: int, sig: bytes, pubkey: bytes) -> None:
+        # Inputs are signed in order, so input n's witness is appended next
+        tx.wit.vtxinwit.append(CTxInWitness())
+        tx.wit.vtxinwit[n].scriptWitness.stack = [sig, pubkey]
+
     def _fundTxElectrum(
         self,
         tx,
@@ -2510,7 +2528,7 @@ class BTCInterface(FeeValidator, Secp256k1Interface):
 
         utxos.sort(key=lambda x: x.get("value", 0), reverse=True)
 
-        input_vsize = 68
+        input_vsize = self._electrumInputVSize()
         est_vsize = 10 + len(parsed_tx.vout) * 34 + input_vsize
         if isinstance(feerate, int):
             fee_per_vbyte = max(1, feerate // 1000)
@@ -2541,20 +2559,18 @@ class BTCInterface(FeeValidator, Secp256k1Interface):
         funded_tx = CTransaction()
         funded_tx.nVersion = self.txVersion()
 
-        dummy_witness_stack = []
         for utxo in selected_utxos:
             txid_bytes = bytes.fromhex(utxo["txid"])[::-1]
             txid_int = int.from_bytes(txid_bytes, "little")
             funded_tx.vin.append(
                 CTxIn(COutPoint(txid_int, utxo["vout"]), nSequence=0xFFFFFFFD)
             )
-            dummy_witness_stack.append(self.getP2WPKHDummyWitness())
 
         for out in parsed_tx.vout:
             funded_tx.vout.append(out)
 
-        witness_bytes_len_est = self.getWitnessStackSerialisedLength(
-            dummy_witness_stack
+        sig_bytes_est, witness_bytes_len_est = self._electrumSigBytes(
+            len(selected_utxos)
         )
 
         feerate_satkb = (
@@ -2562,7 +2578,9 @@ class BTCInterface(FeeValidator, Secp256k1Interface):
         )
         min_relay_fee = 250
 
-        rough_vsize = 10 + (len(funded_tx.vout) + 1) * 34 + len(selected_utxos) * 68
+        rough_vsize = (
+            10 + (len(funded_tx.vout) + 1) * 34 + len(selected_utxos) * input_vsize
+        )
         rough_fee = max(round(feerate_satkb * rough_vsize / 1000), min_relay_fee)
         rough_change = (
             (total_input - total_output)
@@ -2582,7 +2600,9 @@ class BTCInterface(FeeValidator, Secp256k1Interface):
             funded_tx.vout.append(self.txoType()(rough_change, change_script))
 
             final_vsize = self.getTxVSize(
-                funded_tx, add_witness_bytes=witness_bytes_len_est
+                funded_tx,
+                add_bytes=sig_bytes_est,
+                add_witness_bytes=witness_bytes_len_est,
             )
             final_fee = max(round(feerate_satkb * final_vsize / 1000), min_relay_fee)
             change = (
@@ -2596,7 +2616,9 @@ class BTCInterface(FeeValidator, Secp256k1Interface):
             else:
                 funded_tx.vout.pop()
                 final_vsize = self.getTxVSize(
-                    funded_tx, add_witness_bytes=witness_bytes_len_est
+                    funded_tx,
+                    add_bytes=sig_bytes_est,
+                    add_witness_bytes=witness_bytes_len_est,
                 )
                 final_fee = max(
                     round(feerate_satkb * final_vsize / 1000), min_relay_fee
@@ -2604,7 +2626,9 @@ class BTCInterface(FeeValidator, Secp256k1Interface):
                 change = 0
         else:
             final_vsize = self.getTxVSize(
-                funded_tx, add_witness_bytes=witness_bytes_len_est
+                funded_tx,
+                add_bytes=sig_bytes_est,
+                add_witness_bytes=witness_bytes_len_est,
             )
             final_fee = max(round(feerate_satkb * final_vsize / 1000), min_relay_fee)
             change = 0
@@ -3050,8 +3074,7 @@ class BTCInterface(FeeValidator, Secp256k1Interface):
 
             sig = self.signTx(priv_key, tx, i, script_code, value)
 
-            parsed_tx.wit.vtxinwit.append(CTxInWitness())
-            parsed_tx.wit.vtxinwit[i].scriptWitness.stack = [sig, pubkey]
+            self._electrumSetInputSig(parsed_tx, i, sig, pubkey)
 
         self._log.debug(
             f"_signTxWithWalletElectrum: signed {len(utxos)} inputs "
@@ -3100,8 +3123,7 @@ class BTCInterface(FeeValidator, Secp256k1Interface):
 
         parsed_tx = self.loadTx(tx)
         parsed_tx.wit.vtxinwit.clear()
-        parsed_tx.wit.vtxinwit.append(CTxInWitness())
-        parsed_tx.wit.vtxinwit[0].scriptWitness.stack = [sig, pubkey]
+        self._electrumSetInputSig(parsed_tx, 0, sig, pubkey)
 
         self._log.debug(
             f"_signTxWithKeyLocal: signed tx with key, prev_amount={prev_amount}"

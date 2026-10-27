@@ -25,6 +25,9 @@ import os
 
 from io import BytesIO
 
+from coincurve.keys import PrivateKey, PublicKey
+from coincurve.types import ffi
+
 from basicswap.chainparams import Coins
 from basicswap.contrib.mnemonic import Mnemonic
 from basicswap.contrib.test_framework.messages import (
@@ -35,11 +38,13 @@ from basicswap.contrib.test_framework.messages import (
 )
 from basicswap.contrib.test_framework.script import (
     CScript,
+    LegacySignatureHash,
     OP_CHECKSIG,
     OP_DUP,
     OP_EQUAL,
     OP_EQUALVERIFY,
     OP_HASH160,
+    SIGHASH_ALL,
 )
 from basicswap.util import b2i, ensure
 from basicswap.util.crypto import hash160
@@ -124,6 +129,8 @@ class DIVIInterface(BTCInterface):
     # -- wallet ------------------------------------------------------------
 
     def checkWallets(self) -> int:
+        if self.useBackend():
+            return super().checkWallets()
         # No multiwallet support: divid has no listwallets, and the single
         # wallet is always loaded.  Same as Firo and Navcoin.
         return 1
@@ -131,6 +138,8 @@ class DIVIInterface(BTCInterface):
     # -- wallet seed -------------------------------------------------------
 
     def getWalletSeedID(self) -> str:
+        if self.useBackend():
+            return super().getWalletSeedID()
         # Matches Dash: derive the id from the BIP39 entropy where the wallet
         # reports a mnemonic, so it lines up with what prepare.py set.
         try:
@@ -148,6 +157,8 @@ class DIVIInterface(BTCInterface):
         return self.getSeedHash(bytes.fromhex(hdseed)).hex()
 
     def checkExpectedSeed(self, expect_seedid: str) -> bool:
+        if self.useBackend():
+            return super().checkExpectedSeed(expect_seedid)
         self._expect_seedid_hex = expect_seedid
         have_expected_seed: bool = expect_seedid == self.getWalletSeedID()
         self._have_checked_seed = True
@@ -167,6 +178,8 @@ class DIVIInterface(BTCInterface):
         it does not, the wallet file has to be removed and the daemon
         restarted -- there is no in-place fix.
         """
+        if self.useBackend():
+            return super().initialiseWallet(key_bytes, restore_time)
         self._have_checked_seed = False
         expect_seedid: str = self.getAddressHashFromKey(key_bytes)[::-1].hex()
         if self.getWalletSeedID() == expect_seedid:
@@ -185,11 +198,69 @@ class DIVIInterface(BTCInterface):
         tx.deserialize(BytesIO(tx_bytes), False)
         return tx
 
+    def signTx(
+        self,
+        key_bytes: bytes,
+        tx_bytes: bytes,
+        input_n: int,
+        prevout_script: bytes,
+        prevout_value: int,
+    ) -> bytes:
+        # Legacy sighash: Divi has no segwit, so the value is not committed to.
+        tx = self.loadTx(tx_bytes)
+        sig_hash = LegacySignatureHash(prevout_script, tx, input_n, SIGHASH_ALL)[0]
+
+        eck = PrivateKey(key_bytes)
+        for i in range(10000):
+            # Grind for low-R value
+            if i == 0:
+                nonce = (ffi.NULL, ffi.NULL)
+            else:
+                extra_entropy = i.to_bytes(4, "little") + (b"\0" * 28)
+                nonce = (ffi.NULL, ffi.new("unsigned char [32]", extra_entropy))
+            sig = eck.sign(sig_hash, hasher=None, custom_nonce=nonce)
+            if len(sig) < 71:
+                return sig + bytes((SIGHASH_ALL,))
+        raise RuntimeError("sign failed.")
+
+    def verifyTxSig(
+        self,
+        tx_bytes: bytes,
+        sig: bytes,
+        K: bytes,
+        input_n: int,
+        prevout_script: bytes,
+        prevout_value: int,
+    ) -> bool:
+        if isinstance(sig, bytes) is False or len(sig) < 1:
+            return False
+        if sig[-1] != SIGHASH_ALL:
+            return False
+        tx = self.loadTx(tx_bytes)
+        sig_hash = LegacySignatureHash(prevout_script, tx, input_n, SIGHASH_ALL)[0]
+        return PublicKey(K).verify(sig[:-1], sig_hash, hasher=None)
+
+    # Light-wallet inputs are P2PKH: the signature and pubkey go in the
+    # scriptSig, which counts in full towards the size.
+
+    def _electrumInputVSize(self) -> int:
+        return self.TX_P2PKH_INPUT_BYTES
+
+    def _electrumSigBytes(self, n_inputs: int) -> (int, int):
+        return 107 * n_inputs, 0
+
+    def _electrumSetInputSig(self, tx, n: int, sig: bytes, pubkey: bytes) -> None:
+        tx.vin[n].scriptSig = CScript([sig, pubkey])
+
     def signTxWithWallet(self, tx):
+        if self.useBackend():
+            return super().signTxWithWallet(tx)
         rv = self.rpc("signrawtransaction", [tx.hex()])
         return bytes.fromhex(rv["hex"])
 
     def signTxWithKey(self, tx: bytes, key: bytes, prev_amount=None) -> bytes:
+        if self.useBackend():
+            return super().signTxWithKey(tx, key, prev_amount)
         key_wif = self.encodeKey(key)
         rv = self.rpc(
             "signrawtransaction",
@@ -213,6 +284,8 @@ class DIVIInterface(BTCInterface):
         a JSON number.
         """
         return float(value)
+
+    MIN_RELAY_FEE = 0.0001  # DIVI per kB, divid's minrelaytxfee
 
     # Legacy P2PKH size estimates, used for fee calculation since divid cannot
     # size a transaction for us.
@@ -243,6 +316,10 @@ class DIVIInterface(BTCInterface):
         happen here: pick inputs, size the transaction, take the fee and add a
         change output.
         """
+        if self.useBackend():
+            return super().createRawFundedTransaction(
+                addr_to, amount, sub_fee, lock_unspents, feerate
+            )
         if feerate:
             fee_rate = self.format_amount(feerate)
             fee_src = "specified"
@@ -359,6 +436,10 @@ class DIVIInterface(BTCInterface):
         The fee is taken from the change, or evenly from the existing outputs
         with ``subfee``.
         """
+        if self.useBackend():
+            return super().fundTx(
+                tx, feerate, lock_unspents, subfee, bid_id, cursor, prevouts
+            )
         tx_obj = self.loadTx(tx)
         ensure(len(tx_obj.vout) > 0, "Missing tx outputs")
         fee_rate_sats: int = int(feerate)
@@ -451,6 +532,8 @@ class DIVIInterface(BTCInterface):
         return tx_obj.serialize()
 
     def createRawSignedTransaction(self, addr_to, amount) -> str:
+        if self.useBackend():
+            return super().createRawSignedTransaction(addr_to, amount)
         txn_funded = self.createRawFundedTransaction(addr_to, amount)
         return self.rpc("signrawtransaction", [txn_funded])["hex"]
 
@@ -495,6 +578,8 @@ class DIVIInterface(BTCInterface):
     # -- chain queries -----------------------------------------------------
 
     def getTransaction(self, txid_hex: str, verbose: bool = True):
+        if self.useBackend():
+            return super().getTransaction(txid_hex, verbose)
         # divid's getrawtransaction takes an int for verbose and rejects a
         # JSON bool with 'value is type bool, expected int'.  getblock, oddly,
         # does accept a bool.
@@ -526,6 +611,16 @@ class DIVIInterface(BTCInterface):
         IronDivi answers the same call by scanning the UTXO set, which takes
         about 7 s on mainnet, so the default 10 s RPC timeout is too tight.
         """
+        if self.useBackend():
+            return super().getLockTxHeight(
+                txid,
+                dest_address,
+                bid_amount,
+                rescan_from,
+                find_index,
+                vout,
+                return_invalid_txids,
+            )
         try:
             utxos = self.rpc(
                 "getaddressutxos", [{"addresses": [dest_address]}], timeout=60
@@ -569,6 +664,8 @@ class DIVIInterface(BTCInterface):
         return rv
 
     def getUTXOBalance(self, address: str) -> int:
+        if self.useBackend():
+            return super().getUTXOBalance(address)
         # verifyProofOfFunds uses scantxoutset, which divid does not have.
         # The address index holds the same confirmed outputs.  IronDivi scans
         # the UTXO set for it, so allow the same 60 s as getLockTxHeight.
@@ -576,6 +673,8 @@ class DIVIInterface(BTCInterface):
         return sum(int(utxo["satoshis"]) for utxo in utxos)
 
     def isAddressMine(self, address: str, or_watch_only: bool = False) -> bool:
+        if self.useBackend():
+            return super().isAddressMine(address, or_watch_only)
         # divid has no getaddressinfo; validateaddress carries ismine and
         # iswatchonly instead.
         addr_info = self.rpc_wallet("validateaddress", [address])
@@ -586,6 +685,8 @@ class DIVIInterface(BTCInterface):
         return addr_info.get("iswatchonly", False)
 
     def getBlockHeaderFromHeight(self, height: int) -> dict:
+        if self.useBackend():
+            return super().getBlockHeaderFromHeight(height)
         # getblockheader omits hash and height; getblock carries both.
         block_hash: str = self.rpc("getblockhash", [height])
         return self.rpc("getblock", [block_hash, True])
@@ -597,6 +698,8 @@ class DIVIInterface(BTCInterface):
         since callers want ["hash"] and ["height"] and divid's getblockheader
         reports neither.
         """
+        if self.useBackend():
+            return self._getBlockHeaderAtElectrum(time_target, block_after)
         blockchaininfo = self.rpc("getblockchaininfo")
         last_block_header = self.rpc(
             "getblock", [blockchaininfo["bestblockhash"], True]
@@ -612,6 +715,20 @@ class DIVIInterface(BTCInterface):
             last_block_header = prev_block_header
         raise ValueError(f"{self.ticker()} getBlockHeaderAt depth exceeded")
 
+    def _getBlockHeaderAtElectrum(self, time_target: int, block_after: bool) -> dict:
+        # The same walk over the verified header chain.
+        height: int = self.getChainHeight()
+        last_block_header = self.getBlockHeaderFromHeight(height)
+        for _ in range(5000):
+            if height < 1:
+                break
+            height -= 1
+            prev_block_header = self.getBlockHeaderFromHeight(height)
+            if prev_block_header["time"] <= time_target:
+                return last_block_header if block_after else prev_block_header
+            last_block_header = prev_block_header
+        raise ValueError(f"{self.ticker()} getBlockHeaderAt depth exceeded")
+
     def getBlockchainInfo(self):
         """Add verificationprogress, which divid does not report.
 
@@ -621,6 +738,8 @@ class DIVIInterface(BTCInterface):
         whole call raises KeyError, getWalletInfo is logged as failed, and the
         coin never gets a balance in the wallets API.
         """
+        if self.useBackend():
+            return super().getBlockchainInfo()
         rv = self.rpc("getblockchaininfo")
         if "verificationprogress" not in rv:
             blocks: int = rv.get("blocks", 0)
@@ -632,12 +751,16 @@ class DIVIInterface(BTCInterface):
         return rv
 
     def getWalletRestoreHeight(self) -> int:
+        if self.useBackend():
+            return super().getWalletRestoreHeight()
         # BTCInterface derives this from getwalletinfo()["keypoololdest"] and
         # getblockheader()["height"]; divid reports neither.  Without a wallet
         # creation time the only safe restore point is the genesis block.
         return 0
 
     def getBlockWithTxns(self, block_hash: str):
+        if self.useBackend():
+            return super().getBlockWithTxns(block_hash)
         # Divi's getblock only returns txids.
         block = self.rpc("getblock", [block_hash, True])
         tx_rv = []
@@ -648,6 +771,8 @@ class DIVIInterface(BTCInterface):
         return block
 
     def getBlockHeader(self, block_hash: str) -> dict:
+        if self.useBackend():
+            return super().getBlockHeader(block_hash)
         # Divi's getblockheader returns only version, previousblockhash,
         # merkleroot, time, bits and nonce -- no height, confirmations or
         # mediantime.  getblock carries all three, so use it instead.
@@ -660,6 +785,8 @@ class DIVIInterface(BTCInterface):
         Divi, so walk back over the last MEDIAN_TIME_SPAN headers and take the
         median of their timestamps, which is what core does internally.
         """
+        if self.useBackend():
+            return super().getChainMedianTime()
         median_time_span: int = 11
         block_hash: str = self.rpc("getbestblockhash")
         times: list = []
@@ -673,6 +800,8 @@ class DIVIInterface(BTCInterface):
         return times[len(times) // 2]
 
     def findConfirmedTxnByHash(self, txid_hex: str):
+        if self.useBackend():
+            return super().findConfirmedTxnByHash(txid_hex)
         # Only works for wallet txns
         try:
             rv = self.rpc("gettransaction", [txid_hex])
@@ -688,12 +817,38 @@ class DIVIInterface(BTCInterface):
 
     # -- balances and fees -------------------------------------------------
 
+    def get_fee_rate(self, conf_target: int = 2) -> (float, str):
+        # divid refuses anything under its 0.0001 DIVI/kB relay fee, and the
+        # light-wallet fallback rate is below that.
+        fee_rate, rate_src = super().get_fee_rate(conf_target)
+        if fee_rate < self.MIN_RELAY_FEE:
+            return self.MIN_RELAY_FEE, rate_src + " (min relay fee)"
+        return fee_rate, rate_src
+
+    def canExportToElectrum(self) -> bool:
+        # There is no Divi Electrum wallet to export to.
+        return False
+
+    def getAccountKey(
+        self,
+        key_bytes: bytes,
+        extkey_prefix: int | None = None,
+        coin_type_overide: int | None = None,
+    ) -> str:
+        # BTCInterface exports a BIP84 zprv, which means P2WPKH.  Divi has no
+        # segwit, so an account key would only mislead.
+        raise ValueError(f"{self.coin_name()} has no exportable account key")
+
     def getSpendableBalance(self) -> int:
+        if self.useBackend():
+            return super().getSpendableBalance()
         # getwalletinfo.balance already excludes masternode collateral and
         # locked (staking) outputs, which listunspent would report.
         return self.make_int(self.rpc("getwalletinfo")["balance"])
 
     def withdrawCoin(self, value, addr_to, subfee):
+        if self.useBackend():
+            return super().withdrawCoin(value, addr_to, subfee)
         # value arrives as a string from the UI; divid needs a JSON number.
         if not subfee:
             return self.rpc("sendtoaddress", [addr_to, self._amountToReal(value)])
@@ -721,6 +876,8 @@ class DIVIInterface(BTCInterface):
         lock_tx_vout: int,
         script_pk: bytes,
     ) -> (int, int):
+        if self.useBackend():
+            return super().getBLockTxo(chain_b_lock_txid, lock_tx_vout, script_pk)
         # BTCInterface reads the lock tx with the watch-only wallet's
         # gettransaction.  Divi has no watch-only wallet and the lock output
         # pays a swap key the wallet does not hold, so read it from the chain.
@@ -744,6 +901,8 @@ class DIVIInterface(BTCInterface):
     # -- wallet encryption -------------------------------------------------
 
     def encryptWallet(self, password: str, check_seed: bool = True):
+        if self.useBackend():
+            return super().encryptWallet(password, check_seed)
         # Watchonly wallets are not encrypted
         seed_id_before: str = self.getWalletSeedID()
 
