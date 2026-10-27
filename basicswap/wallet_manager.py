@@ -12,7 +12,7 @@ import time
 from coincurve import PrivateKey, PublicKey
 from Crypto.Cipher import ChaCha20_Poly1305  # pycryptodome
 
-from .chainparams import Coins
+from .chainparams import Coins, chainparams
 from .contrib.test_framework import segwit_addr
 from .contrib.test_framework.script import CScript, CScriptOp
 from .db_wallet import (
@@ -23,6 +23,7 @@ from .db_wallet import (
     WalletTxCache,
     WalletWatchOnly,
 )
+from .util.address import decodeAddress, encodeAddress
 from .util.crypto import hash160, sha256
 from .util.extkey import ExtKeyPair
 
@@ -38,7 +39,10 @@ _AEAD_MAC_LEN = 16
 
 class WalletManager:
 
-    SUPPORTED_COINS = {Coins.BTC, Coins.LTC}
+    SUPPORTED_COINS = {Coins.BTC, Coins.LTC, Coins.DIVI}
+
+    # Coins without segwit use legacy P2PKH addresses on BIP44 paths.
+    P2PKH_COINS = {Coins.DIVI}
 
     BIP84_COIN_TYPES = {
         Coins.BTC: 0,
@@ -94,9 +98,9 @@ class WalletManager:
             )
 
         self._root_extkeys[coin_type] = ek
-        bip44_coin = self.BIP84_COIN_TYPES.get(coin_type, 0)
-        ext_path = f"84h/{bip44_coin}h/0h/0"
-        int_path = f"84h/{bip44_coin}h/0h/1"
+        purpose, bip44_coin = self._purpose(coin_type), self._coinIndex(coin_type)
+        ext_path = f"{purpose}h/{bip44_coin}h/0h/0"
+        int_path = f"{purpose}h/{bip44_coin}h/0h/1"
 
         self._external_chains[coin_type] = ek.derive_path(ext_path)
         self._internal_chains[coin_type] = ek.derive_path(int_path)
@@ -116,6 +120,36 @@ class WalletManager:
     def _getHRP(self, coin_type: Coins) -> str:
         return self.HRP.get(coin_type, {}).get(self._swap_client.chain, "bc")
 
+    def _isP2PKH(self, coin_type: Coins) -> bool:
+        return coin_type in self.P2PKH_COINS
+
+    def _purpose(self, coin_type: Coins) -> int:
+        return 44 if self._isP2PKH(coin_type) else 84
+
+    def _coinIndex(self, coin_type: Coins) -> int:
+        if self._isP2PKH(coin_type):
+            return chainparams[coin_type][self._swap_client.chain]["bip44"]
+        return self.BIP84_COIN_TYPES.get(coin_type, 0)
+
+    def _pathType(self, coin_type: Coins) -> str:
+        return "bip44" if self._isP2PKH(coin_type) else "bip84"
+
+    def _derivationPath(self, coin_type: Coins, internal: bool, index: int) -> str:
+        purpose, bip44_coin = self._purpose(coin_type), self._coinIndex(coin_type)
+        chain_idx = 1 if internal else 0
+        return f"m/{purpose}'/{bip44_coin}'/0'/{chain_idx}/{index}"
+
+    def _pkhToAddress(self, coin_type: Coins, pkh: bytes) -> str:
+        if self._isP2PKH(coin_type):
+            prefix = chainparams[coin_type][self._swap_client.chain]["pubkey_address"]
+            return encodeAddress(bytes((prefix,)) + pkh)
+        return segwit_addr.encode_segwit_address(self._getHRP(coin_type), 0, pkh)
+
+    def _pkhToScript(self, coin_type: Coins, pkh: bytes) -> bytes:
+        if self._isP2PKH(coin_type):
+            return bytes([0x76, 0xA9, 0x14]) + pkh + bytes([0x88, 0xAC])
+        return bytes([0x00, 0x14]) + pkh
+
     def _deriveKey(self, coin_type: Coins, index: int, internal: bool = False) -> bytes:
         chain = (
             self._internal_chains[coin_type]
@@ -130,8 +164,8 @@ class WalletManager:
         key = self._deriveKey(coin_type, index, internal)
         pubkey = PublicKey.from_secret(key).format()
         pkh = hash160(pubkey)
-        address = segwit_addr.encode_segwit_address(self._getHRP(coin_type), 0, pkh)
-        scripthash = sha256(bytes([0x00, 0x14]) + pkh)[::-1].hex()
+        address = self._pkhToAddress(coin_type, pkh)
+        scripthash = sha256(self._pkhToScript(coin_type, pkh))[::-1].hex()
         return address, scripthash, pubkey
 
     def _syncStateIndices(self, coin_type: Coins, cursor) -> None:
@@ -212,7 +246,7 @@ class WalletManager:
                         coin_type=int(coin_type),
                         last_external_index=0,
                         last_internal_index=0,
-                        derivation_path_type="bip84",
+                        derivation_path_type=self._pathType(coin_type),
                         migration_complete=False,
                         created_at=now,
                         updated_at=now,
@@ -281,15 +315,15 @@ class WalletManager:
             address, scripthash, pubkey = self._deriveAddress(
                 coin_type, next_index, internal
             )
-            bip44_coin = self.BIP84_COIN_TYPES.get(coin_type, 0)
-            chain_idx = 1 if internal else 0
             now = int(time.time())
             self._swap_client.add(
                 WalletAddress(
                     coin_type=int(coin_type),
                     derivation_index=next_index,
                     is_internal=internal,
-                    derivation_path=f"m/84'/{bip44_coin}'/0'/{chain_idx}/{next_index}",
+                    derivation_path=self._derivationPath(
+                        coin_type, internal, next_index
+                    ),
                     address=address,
                     scripthash=scripthash,
                     pubkey=pubkey,
@@ -393,15 +427,13 @@ class WalletManager:
                 return False
 
             addr, scripthash, pubkey = self._deriveAddress(coin_type, index, internal)
-            bip44_coin = self.BIP84_COIN_TYPES.get(coin_type, 0)
-            chain_idx = 1 if internal else 0
             now = int(time.time())
             self._swap_client.add(
                 WalletAddress(
                     coin_type=int(coin_type),
                     derivation_index=index,
                     is_internal=internal,
-                    derivation_path=f"m/84'/{bip44_coin}'/0'/{chain_idx}/{index}",
+                    derivation_path=self._derivationPath(coin_type, internal, index),
                     address=address,
                     scripthash=scripthash,
                     pubkey=pubkey,
@@ -507,7 +539,9 @@ class WalletManager:
             address, scripthash, pubkey = self._deriveAddress(
                 coin_type, next_index, internal=True
             )
-            path = f"84h/{self.BIP84_COIN_TYPES.get(coin_type, 0)}h/0h/1/{next_index}"
+            path = self._derivationPath(coin_type, True, next_index)[2:].replace(
+                "'", "h"
+            )
 
             now = int(time.time())
             self._swap_client.add(
@@ -921,12 +955,7 @@ class WalletManager:
     ) -> bool:
         try:
             pubkey = PublicKey.from_secret(private_key).format()
-            if (
-                segwit_addr.encode_segwit_address(
-                    self._getHRP(coin_type), 0, hash160(pubkey)
-                )
-                != address
-            ):
+            if self._pkhToAddress(coin_type, hash160(pubkey)) != address:
                 return False
         except Exception:
             return False
@@ -1056,7 +1085,7 @@ class WalletManager:
             return None
         key = self._root_extkeys[coin_type].derive_path(path[2:])._key
         pkh = hash160(PublicKey.from_secret(key).format())
-        address = segwit_addr.encode_segwit_address(self._getHRP(coin_type), 0, pkh)
+        address = self._pkhToAddress(coin_type, pkh)
         return key if address == addr_info.get("address") else None
 
     def _b58decode(self, s: str) -> bytes:
@@ -1137,6 +1166,15 @@ class WalletManager:
         return bytes(a ^ b for a, b in zip(encrypted_key, self._getXorKey(coin_type)))
 
     def _computeScripthash(self, coin_type: Coins, address: str) -> str:
+        if self._isP2PKH(coin_type):
+            try:
+                data = decodeAddress(address)
+            except Exception:
+                return ""
+            prefix = chainparams[coin_type][self._swap_client.chain]["pubkey_address"]
+            if data is None or len(data) != 21 or data[0] != prefix:
+                return ""
+            return sha256(self._pkhToScript(coin_type, data[1:]))[::-1].hex()
         version, data = segwit_addr.decode_segwit_address(
             self._getHRP(coin_type), address
         )
@@ -1180,10 +1218,8 @@ class WalletManager:
             raise ValueError(f"Wallet not initialized for {Coins(coin_type).name}")
         self._migration_in_progress.add(coin_type)
         try:
-            bip44_coin = self.BIP84_COIN_TYPES.get(coin_type, 0)
             derived_addresses = []
             for internal in [False, True]:
-                chain_idx = 1 if internal else 0
                 for i in range(num_addresses):
                     address, scripthash, pubkey = self._deriveAddress(
                         coin_type, i, internal
@@ -1195,7 +1231,7 @@ class WalletManager:
                             "address": address,
                             "scripthash": scripthash,
                             "pubkey": pubkey,
-                            "deriv_path": f"m/84'/{bip44_coin}'/0'/{chain_idx}/{i}",
+                            "deriv_path": self._derivationPath(coin_type, internal, i),
                         }
                     )
 
@@ -1213,7 +1249,7 @@ class WalletManager:
                             coin_type=int(coin_type),
                             last_external_index=0,
                             last_internal_index=0,
-                            derivation_path_type="bip84",
+                            derivation_path_type=self._pathType(coin_type),
                             migration_complete=False,
                             created_at=now,
                             updated_at=now,
@@ -1381,12 +1417,10 @@ class WalletManager:
             current_external = state.last_external_index or 0
             current_internal = state.last_internal_index or 0
             added = 0
-            bip44_coin = self.BIP84_COIN_TYPES.get(coin_type, 0)
             now = int(time.time())
 
             for internal in [False, True]:
                 current = current_internal if internal else current_external
-                chain_idx = 1 if internal else 0
 
                 for i in range(current + 1, current + count + 1):
                     existing = self._swap_client.queryOne(
@@ -1409,7 +1443,9 @@ class WalletManager:
                             coin_type=int(coin_type),
                             derivation_index=i,
                             is_internal=internal,
-                            derivation_path=f"m/84'/{bip44_coin}'/0'/{chain_idx}/{i}",
+                            derivation_path=self._derivationPath(
+                                coin_type, internal, i
+                            ),
                             address=address,
                             scripthash=scripthash,
                             pubkey=pubkey,

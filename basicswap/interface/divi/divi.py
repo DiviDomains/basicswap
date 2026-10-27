@@ -52,7 +52,6 @@ from basicswap.interface.electrum_blockchain import (
 from basicswap.rpc import make_rpc_func
 from basicswap.util.address import decodeAddress
 
-
 # Divi headers are 80 bytes at version <= 3 and 112 bytes after, and the
 # IronDivi Electrum server pads every header to 112.  See
 # IronDivi docs/electrum-server.md.
