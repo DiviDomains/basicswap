@@ -10352,7 +10352,8 @@ class BasicSwap(BaseApp, BSXNetwork, UIApp):
                 script_sig = spend_in["scriptSig"]["asm"].split(" ")
                 ensure(len(script_sig) == 5, "Bad witness size")
                 return bytes.fromhex(script_sig[2])
-        except Exception:
+        except Exception as e:
+            self.log.debug(f"extractSecret: no secret in spend input: {e!r}")
             return None
 
     def addWatchedTransaction(
