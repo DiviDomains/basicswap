@@ -104,7 +104,7 @@ class Test(test_divi.Test):
 
         # Node 1's deposit address comes from the BIP44 light wallet and is
         # a regtest P2PKH address.
-        addr = read_json_api(1801, "wallets/divi/nextdepositaddr")
+        addr = read_json_api(1801, "wallets/divi/nextdepositaddr", {})
         assert addr[0] in ("x", "y"), addr
         assert sc.getWalletManager().getPrivateKey(Coins.DIVI, addr) is not None
 
