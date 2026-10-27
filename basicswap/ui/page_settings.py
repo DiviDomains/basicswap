@@ -271,6 +271,7 @@ def page_settings(self, url_split, post_string):
             electrum_supported_coins = (
                 "bitcoin",
                 "litecoin",
+                "divi",
             )
             for name, c in swap_client.settings["chainclients"].items():
                 if have_data_entry(form_data, "apply_" + name):
@@ -436,6 +437,7 @@ def page_settings(self, url_split, post_string):
     electrum_supported_coins = (
         "bitcoin",
         "litecoin",
+        "divi",
     )
 
     sorted_names = sorted(swap_client.settings["chainclients"].keys())

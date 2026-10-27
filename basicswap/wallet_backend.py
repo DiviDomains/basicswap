@@ -177,6 +177,7 @@ class ElectrumBackend(WalletBackend):
         coin_name_map = {
             Coins.BTC: "bitcoin",
             Coins.LTC: "litecoin",
+            Coins.DIVI: "divi",
         }
         coin_name = coin_name_map.get(coin_type, "bitcoin")
 

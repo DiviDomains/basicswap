@@ -237,6 +237,10 @@ class DIVIPrepare(CoinPrepareModule):
         # divid creates its single wallet itself at first start (no
         # multiwallet, no createwallet).  Once RPC answers, the daemon has
         # read its conf and built the wallet, so the seed can go.
+        if core_settings.get("connection_type") == "electrum":
+            # No divid runs; the light wallet derives its keys itself.
+            self._dropSeed()
+            return
         swap_client.waitForDaemonRPC(coin_id, with_wallet=False)
         self._dropSeed()
 

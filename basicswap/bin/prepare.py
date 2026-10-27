@@ -881,6 +881,12 @@ def printHelp():
     print("--ltc-mode=MODE          Set LTC connection mode: rpc, electrum, or remote.")
     print("--btc-electrum-server=   Custom Electrum server for BTC (host:port:ssl).")
     print("--ltc-electrum-server=   Custom Electrum server for LTC (host:port:ssl).")
+    print(
+        "--divi-mode=MODE         Set DIVI connection mode: rpc, electrum, or remote."
+    )
+    print(
+        "--divi-electrum-server=  Electrum server for DIVI (host:port:ssl); required, there is no default."
+    )
 
     active_coins = []
     for coin_name in known_coins.keys():
@@ -1082,7 +1088,11 @@ def initialise_wallets(
                         coin_settings["restore_time"] = restore_time
             except Exception as e:
                 coins_failed_to_initialise.append((coin_name, c, e))
-            if WALLET_ENCRYPTION_PWD != "" and module.needsPostInitPasswordChange():
+            if (
+                WALLET_ENCRYPTION_PWD != ""
+                and module.needsPostInitPasswordChange()
+                and coin_settings.get("connection_type") != "electrum"
+            ):
                 ci = swap_client.ci(c)
                 try:
                     ci.changeWalletPassword(
@@ -1752,6 +1762,7 @@ def main():
     electrum_supported_coins = {
         "bitcoin": "btc",
         "litecoin": "ltc",
+        "divi": "divi",
     }
 
     for coin_name, coin_prefix in electrum_supported_coins.items():

@@ -2243,7 +2243,7 @@ def js_electrum_discover(self, url_split, post_string, is_json) -> bytes:
         except ValueError:
             coin_type = getCoinType(coin_str)
 
-    electrum_supported = ["bitcoin", "litecoin"]
+    electrum_supported = ["bitcoin", "litecoin", "divi"]
     coin_name = chainparams.get(coin_type, {}).get("name", "").lower()
     if coin_name not in electrum_supported:
         return bytes(
