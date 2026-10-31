@@ -194,6 +194,7 @@ class ElectrumBackend(WalletBackend):
             proxy_port=proxy_port,
             cert_pins=cert_pins,
             max_servers=max_servers,
+            chain=chain,
         )
 
         self._realtime_callback = None

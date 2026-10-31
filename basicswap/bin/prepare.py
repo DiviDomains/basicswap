@@ -885,7 +885,7 @@ def printHelp():
         "--divi-mode=MODE         Set DIVI connection mode: rpc, electrum, or remote."
     )
     print(
-        "--divi-electrum-server=  Electrum server for DIVI (host:port:ssl); required, there is no default."
+        "--divi-electrum-server=  Electrum server for DIVI (host:port:ssl); electrum.irondivi.com on mainnet, required elsewhere."
     )
 
     active_coins = []

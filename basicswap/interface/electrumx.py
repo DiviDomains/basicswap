@@ -141,11 +141,15 @@ DEFAULT_ELECTRUM_SERVERS = {
         {"host": "electrum-ltc.petrkr.net", "port": 60002, "ssl": True},
         {"host": "electrum.jochen-hoenicke.de", "port": 50004, "ssl": True},
     ],
+    "divi": [
+        {"host": "electrum.irondivi.com", "port": 50002, "ssl": True},
+    ],
 }
 
 DEFAULT_ONION_SERVERS = {
     "bitcoin": [],
     "litecoin": [],
+    "divi": [],
 }
 
 DEFAULT_MAX_ELECTRUM_SERVERS = 2
@@ -761,8 +765,10 @@ class ElectrumServer:
         proxy_port=None,
         cert_pins=None,
         max_servers: int = 1,
+        chain: str = "mainnet",
     ):
         self._coin_name = coin_name
+        self._chain = chain
         self._log = log
         self._max_servers = max(1, int(max_servers))
         self._extra_connections = {}
@@ -820,9 +826,21 @@ class ElectrumServer:
         user_clearnet = self._parse_servers(clearnet_servers)
         user_onion = self._parse_servers(onion_servers)
 
-        final_onion = (
-            user_onion if user_onion else DEFAULT_ONION_SERVERS.get(coin_name, [])
-        )
+        # The default servers are all mainnet, and nothing checks a server's
+        # genesis hash, so off mainnet a coin uses only the servers it is given.
+        if chain == "mainnet":
+            default_clearnet = DEFAULT_ELECTRUM_SERVERS.get(coin_name, [])
+            default_onion = DEFAULT_ONION_SERVERS.get(coin_name, [])
+        else:
+            default_clearnet = []
+            default_onion = []
+            if not user_clearnet and not user_onion and self._log:
+                self._log.warning(
+                    f"ElectrumServer {coin_name}: no servers configured for {chain}, "
+                    f"the defaults are mainnet only"
+                )
+
+        final_onion = user_onion if user_onion else default_onion
 
         self._using_default_servers = not user_clearnet and not user_onion
 
@@ -833,7 +851,7 @@ class ElectrumServer:
                 final_clearnet = (
                     user_clearnet
                     if user_clearnet
-                    else DEFAULT_ELECTRUM_SERVERS.get(coin_name, [])
+                    else default_clearnet
                 )
             self._servers = list(final_onion) + list(final_clearnet)
             if self._log:
@@ -845,7 +863,7 @@ class ElectrumServer:
             final_clearnet = (
                 user_clearnet
                 if user_clearnet
-                else DEFAULT_ELECTRUM_SERVERS.get(coin_name, [])
+                else default_clearnet
             )
             self._servers = list(final_clearnet)
             if self._log:

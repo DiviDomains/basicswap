@@ -141,12 +141,14 @@ run such a server publicly (TLS, binding, limits, checkpoints) is in IronDivi's
 `docs/electrum-server.md`.
 
 ```
-basicswap-prepare --withcoins=divi --light --divi-mode=electrum \
-    --divi-electrum-server=electrum.example.org:50002:s
+basicswap-prepare --withcoins=divi --light --divi-mode=electrum
 ```
 
-There is no default public Divi server, so `--divi-electrum-server` is required. What differs
-from the Bitcoin-family light wallets:
+On mainnet the default server is IronDivi's public `electrum.irondivi.com:50002` (TLS). To use
+your own, pass `--divi-electrum-server=electrum.example.org:50002:true`. On testnet and regtest
+there is no default, because the defaults are mainnet servers and BasicSwap does not check a
+server's genesis hash, so `--divi-electrum-server` is required there. What differs from the
+Bitcoin-family light wallets:
 
 - Addresses are P2PKH on BIP44 paths (`m/44'/119'/0'` mainnet, coin type 1 on test networks),
   since Divi has no SegWit. Inputs are signed with the legacy sighash, and fees are sized at

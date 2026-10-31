@@ -64,6 +64,21 @@ class TestElectrumServerSelection(unittest.TestCase):
         self.assertNotIn(ONION.split(":")[0], hosts)
         self.assertIn("electrum.example.com", hosts)
 
+    def test_divi_mainnet_defaults_to_irondivi(self):
+        server = ElectrumServer("divi")
+        hosts = [s["host"] for s in server._servers]
+        self.assertEqual(hosts, ["electrum.irondivi.com"])
+
+    def test_defaults_are_mainnet_only(self):
+        for coin_name in ("divi", "bitcoin"):
+            server = ElectrumServer(coin_name, chain="testnet")
+            self.assertEqual(server._servers, [])
+
+    def test_given_servers_are_used_off_mainnet(self):
+        server = ElectrumServer("divi", clearnet_servers=[CLEARNET], chain="regtest")
+        hosts = [s["host"] for s in server._servers]
+        self.assertEqual(hosts, ["electrum.example.com"])
+
 
 if __name__ == "__main__":
     unittest.main()
